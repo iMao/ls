@@ -10,6 +10,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include "file_perms.h"
+#include "btree.h"
 
 #define BUFSIZE         512
 
