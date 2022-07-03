@@ -1,6 +1,6 @@
 /*
  * Программа реализует работу утилиты Unix
- * ls, с ключами -l, -a,
+ * ls, с ключами [-l, -a, -h] и без ключей
  * автор: Андрей Макаров
  * email: mailmao.box@gmail.com
  * 2.07.2022
@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 #include <time.h>
 #include <stdio.h>
@@ -22,7 +23,12 @@
 #define BUFSIZE      512
 #define HALF_BUFSIZE (BUFSIZE/2)
 #define STR_SIZE      sizeof("rwxrwxrwx") // размер строки вывода атрибутов файла в режиме ls -l
-#define UGS   1                    // чтобы получить в строке поля: set-user-ID, set-group-ID, и sticky bit UGS (User,Group,StickyBit)
+#define UGS   1    // чтобы получить в строке поля: set-user-ID, set-group-ID, и sticky bit UGS (User,Group,StickyBit)
+
+// коды цветов
+#define RESET_COLOR "\e[m"
+#define MAKE_GREEN  "\e[32m"
+#define MAKE_BLUE   "\e[36m"
 
 // характеристика одной записи в каталоге
 typedef struct {
@@ -41,23 +47,28 @@ struct BTreeNode {
 // режим работы утилиты ls
 typedef enum {NO_OPT,L,A}LS_MODE;
 
+
+static int number_colomns = 0;       // количество колонок для печати записей
+size_t max_string_size = 0;          // максимальная длина строки-имени файла или директории
+
+
 //  функция для представления атрибутов файла в виде строки: rwxrwxrwx
-char * file_permitions_string(mode_t perm, int flags){
+char * file_permitions_string(mode_t permitions, int flags){
     static char str[STR_SIZE];
 
     snprintf(str, STR_SIZE, "%c%c%c%c%c%c%c%c%c",
-             (perm & S_IRUSR) ? 'r' : '-', (perm & S_IWUSR) ? 'w' : '-',
-             (perm & S_IXUSR) ?
-                 (((perm & S_ISUID) && (flags & UGS)) ? 's' : 'x') :
-                 (((perm & S_ISUID) && (flags & UGS)) ? 'S' : '-'),
-             (perm & S_IRGRP) ? 'r' : '-', (perm & S_IWGRP) ? 'w' : '-',
-             (perm & S_IXGRP) ?
-                 (((perm & S_ISGID) && (flags & UGS)) ? 's' : 'x') :
-                 (((perm & S_ISGID) && (flags & UGS)) ? 'S' : '-'),
-             (perm & S_IROTH) ? 'r' : '-', (perm & S_IWOTH) ? 'w' : '-',
-             (perm & S_IXOTH) ?
-                 (((perm & S_ISVTX) && (flags & UGS)) ? 't' : 'x') :
-                 (((perm & S_ISVTX) && (flags & UGS)) ? 'T' : '-'));
+             (permitions & S_IRUSR) ? 'r' : '-', (permitions & S_IWUSR) ? 'w' : '-',
+             (permitions & S_IXUSR) ?
+                 (((permitions & S_ISUID) && (flags & UGS)) ? 's' : 'x') :
+                 (((permitions & S_ISUID) && (flags & UGS)) ? 'S' : '-'),
+             (permitions & S_IRGRP) ? 'r' : '-', (permitions & S_IWGRP) ? 'w' : '-',
+             (permitions & S_IXGRP) ?
+                 (((permitions & S_ISGID) && (flags & UGS)) ? 's' : 'x') :
+                 (((permitions & S_ISGID) && (flags & UGS)) ? 'S' : '-'),
+             (permitions & S_IROTH) ? 'r' : '-', (permitions & S_IWOTH) ? 'w' : '-',
+             (permitions & S_IXOTH) ?
+                 (((permitions & S_ISVTX) && (flags & UGS)) ? 't' : 'x') :
+                 (((permitions & S_ISVTX) && (flags & UGS)) ? 'T' : '-'));
 
     return str;
 }
@@ -68,7 +79,7 @@ static void print_ls_l_opt(Entry* entry){
     if(entry->d_name[0] != '.'){
          printf(" %s", file_permitions_string(entry->stat_buf.st_mode, 0));  // печать: drwxrwxr-x
 
-         printf(" %ld", entry->stat_buf.st_nlink);                 // печать: number hard links
+         printf(" %4ld", entry->stat_buf.st_nlink);                 // печать: number hard links
 
          struct passwd* pw = getpwuid(entry->stat_buf.st_uid);
          printf(" %s", pw->pw_name);                               // печать: username
@@ -84,9 +95,46 @@ static void print_ls_l_opt(Entry* entry){
          timestr+=4;
          strncpy(time_substr,timestr,12);
          printf(" %s", time_substr);                               // печать: time of change
-         printf(" %s\n", entry->d_name);                           // печать: file's name
+
+         // печать разным цветом, в зависимости от типа файла
+         if(!access(entry->d_name,X_OK)){
+             if(S_ISDIR( entry->stat_buf.st_mode) ){
+                 printf(MAKE_BLUE" %s\n"RESET_COLOR, entry->d_name);
+             }else {
+                 printf(MAKE_GREEN" %s\n"RESET_COLOR, entry->d_name);
+             }
+         }else{
+             printf(" %s\n", entry->d_name);
+         }
     }
 }
+
+void print_like_ls(Entry* entry){
+    static int colomn_index = 1;
+
+    if(!access(entry->d_name,X_OK)){
+        if(S_ISDIR( entry->stat_buf.st_mode) ){
+            printf(MAKE_BLUE"%s "RESET_COLOR, entry->d_name);
+        }else {
+            printf(MAKE_GREEN"%s "RESET_COLOR, entry->d_name);
+        }
+    }else{
+        printf("%s ", entry->d_name);
+    }
+
+    int padding = max_string_size - strlen(entry->d_name);
+
+    if(colomn_index < number_colomns){
+        for(int i = 0; i < padding; i++){
+            printf(" ");
+        }
+        colomn_index++;
+    }else{
+        colomn_index = 1;
+        printf("\n");
+    }
+}
+
 
 // функция для печати информации о файле в режиме ls без опций
 static void print_ls_no_opt(Entry* entry){
@@ -96,12 +144,12 @@ static void print_ls_no_opt(Entry* entry){
     {
         return;
     }
-    printf("%s ", entry->d_name);
+    print_like_ls(entry);
 }
 
 // функция для печати информации о файле в режиме ls -a
 static void print_ls_a_opt(Entry* entry){
-    printf("%s ", entry->d_name);
+    print_like_ls(entry);
 }
 
 // функция для добавления узла с записью о файле в бинарное дерево
@@ -164,7 +212,6 @@ static void order_tree(struct BTreeNode *root, LS_MODE lsmode){
         }
 
         order_tree(current_node->right,lsmode);
-
     }
 }
 
@@ -179,7 +226,6 @@ static void delete_btree(struct BTreeNode* node){
 }
 
 
-
 int main(int argc, char* argv[]){
 
     LS_MODE lsmode;
@@ -187,14 +233,23 @@ int main(int argc, char* argv[]){
     DIR *current_dir;
     struct dirent *dir_entry;
     struct stat stat_buf;
+
     char filepath[BUFSIZE];
     char directory_name[HALF_BUFSIZE];
 
+    // корень бинарного дерева
     struct BTreeNode *root = NULL;
     Entry current_entry;
 
     int opt  = 0;
+    size_t current_string_size = 0;
 
+    struct winsize terminal_window_size;
+
+     // запрос ширины и высоты окна терминала
+    ioctl(STDOUT_FILENO,TIOCGWINSZ,&terminal_window_size);
+
+    // очистка буферов
     memset(filepath,'\0',BUFSIZE);
     memset(directory_name,'\0',HALF_BUFSIZE);
 
@@ -223,12 +278,10 @@ int main(int argc, char* argv[]){
                 strcpy(directory_name,argv[2]);
                 break;
             }else if(opt == 'h') {
-                printf("Please use cmdparams -l or -a like:\nls -a .\nls -l .\nls -l /etc\n");
-                return EXIT_FAILURE;
+                printf("Please use cmdparams -l or -a like:\nls -a .\nls -l .\nls -l /etc\nls -h\n");
+                return EXIT_SUCCESS;
             }
         }
-
-
     }
 
     // открываем директорию
@@ -246,6 +299,12 @@ int main(int argc, char* argv[]){
         current_entry.stat_buf = stat_buf;
         strcpy(current_entry.d_name,dir_entry->d_name);
 
+        // находим max длину строки имени файла
+        current_string_size = strlen(dir_entry->d_name);
+        if(current_string_size > max_string_size){
+            max_string_size = current_string_size;
+        }
+
         if(!add_node_to_binary_tree(&root, &current_entry)){
             perror("Couldn't add node to binary tree\n");
             closedir(current_dir);
@@ -254,8 +313,10 @@ int main(int argc, char* argv[]){
         memset(current_entry.d_name,'\0',HALF_BUFSIZE );
     }
 
-    // вывод на печать бинарного дерева в отсортированном порядке
-    // при его обходе
+    number_colomns = terminal_window_size.ws_col / max_string_size;
+
+    // вывод на печать бинарного дерева в
+    // отсортированном порядке при его обходе
     order_tree(root,lsmode);
     printf("\n");
 
